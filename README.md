@@ -121,6 +121,7 @@ jupyter lab "$REPO/notebooks/explore_dataset.ipynb"
 |---|---|
 | **[download_guide.md](download_guide.md)** | 📥 **다운로드 전용 가이드** — aihubshell 설치, API Key, 로케일, 부분 다운로드, 중단·재개, 검증→복구 루프 |
 | **[USAGE.md](USAGE.md)** | 압축 해제 → 메타데이터 생성 → 탐색까지 단계별 설명·옵션·기대 출력·트러블슈팅 |
+| **[handover/README.md](handover/README.md)** | 🤝 인수인계용 — 다운로드 → metadata 생성까지 실행 명령만 순서대로 (API Key 필수) |
 
 처음 받으시는 분은 **[download_guide.md](download_guide.md)** 부터 보세요.
 
@@ -133,6 +134,7 @@ aihub-no-pain-71349/
 ├── README.md                    # 이 파일
 ├── download_guide.md            # 📥 다운로드 전용 상세 가이드
 ├── USAGE.md                     # 압축 해제 이후 단계별 상세 가이드
+├── handover/README.md           # 🤝 인수인계용 실행 순서 (다운로드 → metadata)
 ├── requirements_h200.txt        # Python 3.10 기준 의존성
 ├── LICENSE                      # MIT
 │
