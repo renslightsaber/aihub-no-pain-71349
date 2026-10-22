@@ -119,10 +119,17 @@ cd /data/aihub_71349
 # 검증 스크립트가 기본으로 찾는 위치에 filelist 복사
 cp "$REPO/verify/filelist_71349.txt" .
 
-aihubshell -mode d \
-  -datasetkey 71349 \
-  -aihubapikey "$AIHUB_APIKEY"
+DRY_RUN=1 bash "$REPO/verify/download_71349.sh"   # 받을 개수·용량·batch 미리보기
+bash "$REPO/verify/download_71349.sh"             # 실제 다운로드 (tmux/byobu 안에서)
 ```
+
+`download_71349.sh`는 `aihubshell`을 filekey **10개씩** 호출하고, batch마다 받은 zip을 `unzip -tq`로
+확인해 잘린 파일은 지우고 다시 받습니다(`RETRY`, 기본 2회). 이미 있는 zip은 건너뛰므로 끊겨도 같은 명령으로
+이어받으면 되고, 같은 디렉토리에서 두 개가 동시에 돌지 않도록 잠금을 겁니다.
+옵션·동작 원리는 [download_guide.md 6장](download_guide.md#6-다운로드-실행)을 참고하세요.
+
+> `aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY"`로 한 번에 받아도 되지만,
+> curl이 끊겨도 `Download successful.`을 내고 잘린 zip을 남기는 경우가 있어 끝난 뒤 2장 검증이 필수입니다.
 
 ### 1-3. 다운로드 완료 시 디렉토리 구조
 
@@ -288,8 +295,10 @@ bash "$REPO/verify/repair_aihub.sh"
 | `DATASET_KEY` | `71349` | 데이터셋 키 |
 | `ROOT` | `./133.감성_및_발화_스타일_동시_고려_음성합성_데이터` | 복구 대상 루트 |
 | `FILELIST` | `filelist_${DATASET_KEY}.txt` | filekey 조회용 |
-| `BATCH` | `50` | 한 번의 `aihubshell` 호출에 넣을 filekey 개수 |
+| `BATCH` | `10` | 한 번의 `aihubshell` 호출에 넣을 filekey 개수 (v5까지 50) |
+| `RETRY` | `2` | batch 직후 검증에 실패한 filekey를 다시 요청하는 횟수 |
 | `DRY_RUN` | `0` | 1이면 잔재 정리·다운로드 없이 계획만 출력 |
+| `LOCK_FILE` | `.aihub_download.lock` | 동시 실행 방지용 잠금 파일 (`download_71349.sh`와 공유) |
 | `INCLUDE_NEVER_DOWNLOADED` | `1` | 0이면 "한 번도 받지 않은 파일"은 건드리지 않음 (의도적 부분 다운로드용) |
 | `DEBUG` | `0` | 1이면 파싱 진단 로그 |
 
@@ -307,7 +316,16 @@ bash "$REPO/verify/repair_aihub.sh"
 | `residue_only` | `.part`만 있음 | 잔여물 정리 후 다운로드 |
 | `never_downloaded` | 한 번도 받지 않음 | 다운로드 |
 
-추가로 `download.tar` 잔여물도 자동 정리합니다.
+추가로 현재 디렉토리의 `download.tar`·`download_*.tar` 잔여물도 자동 정리합니다
+(aihubshell은 tar를 `$ROOT`가 아니라 실행한 디렉토리에 만듭니다. v5는 `$ROOT`만 봐서 놓쳤습니다).
+
+v6 추가 동작:
+
+- **batch 검증·재시도** — batch마다 요청한 zip이 생겼고 `unzip -tq`를 통과하는지 확인합니다.
+  실패분(잘림·누락)은 지우고 `RETRY`회 다시 요청하며, 끝까지 실패하면 목록을 출력하고 **exit 1**로 끝납니다.
+- **동시 실행 방지** — 같은 디렉토리에서 `download_71349.sh`/`repair_aihub.sh`가 이미 돌고 있거나
+  (Ctrl+Z로 멈춰 둔 것 포함) 손으로 띄운 `aihubshell`이 돌고 있으면 시작하지 않습니다.
+  `DRY_RUN=1`은 경고만 하고 진행합니다.
 
 ### 기대 출력
 
@@ -328,15 +346,21 @@ bash "$REPO/verify/repair_aihub.sh"
 
 [2/3] filekey 매핑...  매칭: 2건 / 실패: 0건
 
-[3/3] 재다운로드 batch (총 2개, batch=50)
-  >> batch 1 (2개): 560421,561102
+[3/3] 재다운로드 batch (총 2개, batch=10, retry=2)
+  >> batch 1/1 (2개): 560421,561102
+  ...(aihubshell 출력)...
+     batch 검증 중...
+     → 정상 2/2
 
-Done.
-복구 완료. 다시 ./repair_aihub.sh 로 수렴 확인.
+============================================
+  결과: 요청 2개 중 정상 2개 / 실패 0개
+============================================
+  ✓ 요청한 zip 을 모두 받았고 무결성 검사도 통과했습니다.
+  수렴 확인: check_aihub.sh → (선택) verify_zips.sh
 ```
 
-복구 후에는 `repair_aihub.sh`(또는 `check_aihub.sh`)를 한 번 더 돌려
-"재다운로드 필요 없음"이 나오는지 확인하세요.
+실패분이 남으면 `실패한 파일:` 목록과 함께 exit 1로 끝납니다. 같은 명령을 다시 실행하면 그것만 다시 받습니다.
+복구 후에는 `check_aihub.sh`를 한 번 더 돌려 "✓ 모든 zip 파일이 정상"이 나오는지 확인하세요.
 
 ---
 
@@ -984,7 +1008,13 @@ df_clean = df[
 
 ### FAQ 8. 다운로드 도중 끊었어요. 처음부터 다시 해야 하나요?
 
-아니요. `aihubshell`이 받다 만 파일은 `verify/repair_aihub.sh`가 자동으로 식별·재다운로드합니다:
+아니요. `download_71349.sh`로 받고 있었다면 같은 명령을 다시 실행하면 이어받습니다(있는 zip은 건너뜀):
+
+```bash
+bash "$REPO/verify/download_71349.sh"
+```
+
+`aihubshell`을 직접 쓰다 끊겼다면 받다 만 파일은 `verify/repair_aihub.sh`가 자동으로 식별·재다운로드합니다:
 
 ```bash
 # 다운로드 재개
@@ -995,6 +1025,9 @@ bash "$REPO/verify/repair_aihub.sh"                     # 복구 (AIHUB_APIKEY �
 
 의도적으로 일부만 받은 상태라면 `INCLUDE_NEVER_DOWNLOADED=0`을 함께 주세요.
 그러지 않으면 아직 안 받은 파일 전체가 재다운로드 대상이 됩니다.
+
+> ⚠️ 끊을 때는 `Ctrl+C`를 쓰세요. `Ctrl+Z`는 프로세스를 **멈춘 채** 남겨 두어, 다음 실행이
+> "다른 ... 실행 중입니다"로 거부됩니다. 그럴 땐 `jobs` → `kill %번호`로 정리하세요.
 
 ### FAQ 9. WSL2에서 사용 가능한가요?
 

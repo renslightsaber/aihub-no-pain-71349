@@ -19,8 +19,9 @@ AI Hub 「감성 및 발화스타일 동시 고려 음성합성 데이터」(**d
 
 | 사용처 | 방식 |
 |---|---|
-| `aihubshell -mode d` (다운로드) | `-aihubapikey "$AIHUB_APIKEY"` 인자로 전달 |
+| `verify/download_71349.sh` (다운로드) | 환경변수 `AIHUB_APIKEY` — **없으면 즉시 종료** |
 | `verify/repair_aihub.sh` (복구) | 환경변수 `AIHUB_APIKEY` — **없으면 즉시 종료** |
+| `aihubshell -mode d` (직접 실행 시) | `-aihubapikey "$AIHUB_APIKEY"` 인자로 전달 |
 
 > - **ID/PW가 아닙니다.** 이 레포의 어떤 스크립트도 `AIHUB_ID`/`AIHUB_PW`를 쓰지 않습니다.
 > - 승인 전이거나 Key가 만료되면 인증은 되는 듯해도 0바이트/HTML 파일이 받아집니다. 마이페이지에서 승인 상태·유효기간을 확인하세요.
@@ -90,14 +91,18 @@ python3 -c "import pandas" || pip install pandas
 cd "$DSET"
 cp "$REPO/verify/filelist_71349.txt" .       # 검증 스크립트의 기준값 (zip 1,412개 목록 + filekey)
 
-tmux new -s aihub                            # 세션이 끊겨도 살아남게
-aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY"
-#   Ctrl+b d 로 분리, tmux attach -t aihub 로 복귀
+tmux new -s aihub                            # 세션이 끊겨도 살아남게 (byobu 도 가능)
+#   tmux 안은 새 셸이므로 Step 0 의 export 를 다시 실행한 뒤:
+cd "$DSET"
+DRY_RUN=1 bash "$REPO/verify/download_71349.sh"   # 받을 개수·용량 미리보기
+bash "$REPO/verify/download_71349.sh"             # 10개씩 받고 batch마다 unzip -t 검증·재시도
+#   Ctrl+b d (byobu 는 F6) 로 분리, tmux attach -t aihub 로 복귀
 ```
 
-- 완료 기준: zip **1,412개 / 약 220GB**
+- 완료 기준: 마지막에 `✓ 전부 받았고, 이번에 받은 zip 은 무결성 검사도 통과했습니다.` (zip **1,412개 / 약 220GB**)
+- 실패분이 남으면 목록과 함께 exit 1 → **같은 명령을 다시 실행**하면 그것만 이어받습니다
 - 진행 확인(다른 터미널): `find "$DSET" -name "*.zip" | wc -l`
-- 중간에 끊겨도 처음부터 다시 받을 필요 없습니다 → Step 6에서 복구
+- ⚠️ 실행 중 `Ctrl+Z` 금지 — 멈춘 프로세스가 잠금을 쥐고 남아 다음 실행이 거부됩니다 (`jobs` → `kill %번호`로 정리)
 
 ### Step 5. ROOT 잡기
 

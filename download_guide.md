@@ -37,7 +37,7 @@ export AIHUB_APIKEY='<your_api_key>'
 export LANG=C.UTF-8 LC_ALL=C.UTF-8           # locale -a 에 있는 이름으로!
 
 mkdir -p "$DSET" && cd "$DSET" && cp "$REPO/verify/filelist_71349.txt" .
-aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY"
+bash "$REPO/verify/download_71349.sh"        # 10개씩 받고 batch마다 검증·재시도 (tmux 안에서)
 export ROOT="$(find . -maxdepth 1 -type d -name '133.*' | head -1)"
 bash "$REPO/verify/check_aihub.sh" && PARALLEL=8 bash "$REPO/verify/verify_zips.sh"
 ```
@@ -53,7 +53,7 @@ bash "$REPO/verify/check_aihub.sh" && PARALLEL=8 bash "$REPO/verify/verify_zips.
 | 1 | AI Hub 계정 + **71349 다운로드 승인** | 마이페이지 | 신청 후 보통 1~3일 |
 | 2 | **API Key** 발급 | 마이페이지 → API Key | ID/PW가 **아님** |
 | 3 | `aihubshell` | `command -v aihubshell` | 경로 출력 ([3장](#3-aihubshell-설치)) |
-| 4 | `curl`, `unzip`, `find`, `xargs`, `awk`, `sed`, `tr` | `for c in curl unzip find xargs awk sed tr; do command -v $c \|\| echo "missing: $c"; done` | 전부 출력 |
+| 4 | `curl`, `unzip`, `find`, `xargs`, `awk`, `sed`, `tr`, `flock`, `pgrep` | `for c in curl unzip find xargs awk sed tr flock pgrep; do command -v $c \|\| echo "missing: $c"; done` | 전부 출력 (`unzip`이 없으면 `conda install -c conda-forge unzip`) |
 | 5 | bash 4.0+ | `echo $BASH_VERSION` | 4.x 이상 |
 | 6 | 디스크 여유 **600GB+** | `df -BG "$DSET"` | Available ≥ 600 |
 | 7 | inode 여유 | `df -i "$DSET"` | IUse% < 80 |
@@ -198,23 +198,53 @@ head -20 filelist_71349.txt          # 트리 + "이름 | 용량 | filekey" 형�
 
 ## 6. 다운로드 실행
 
+### 6-1. 권장: `download_71349.sh`
+
 ```bash
 cd "$DSET"
+DRY_RUN=1 bash "$REPO/verify/download_71349.sh"   # 받을 개수·용량·batch 구성 미리보기
+bash "$REPO/verify/download_71349.sh"             # 실제 다운로드
+```
+
+`aihubshell`을 직접 부르는 대신 이 스크립트를 쓰는 이유:
+
+| `aihubshell -mode d -datasetkey 71349` 한 줄 | `download_71349.sh` |
+|---|---|
+| 1,412개 전체를 `download.tar` **하나**로 요청 → 끊기면 그 묶음 전체가 날아감 | filekey **10개씩**(`BATCH`) 요청 → 끊겨도 그 10개만 다시 |
+| curl이 중간에 끊겨도(`curl: (18) transfer closed ...`) `Download successful.`을 출력하고 **잘린 tar를 그대로 풀어** 잘린 zip이 남음 (aihubshell 종료 코드 판정 버그) | batch 직후 받은 zip을 하나씩 `unzip -tq` → 실패분은 삭제 후 `RETRY`회(기본 2) 재요청, 끝까지 실패하면 목록과 함께 exit 1 |
+| 같은 디렉토리에서 두 번 실행하면 `download.tar`를 서로 백업·삭제해 꼬임 | `flock` 잠금 + "같은 디렉토리의 aihubshell" 검사로 **동시 실행 거부** |
+| 재실행하면 처음부터 다시 | 이미 있는 zip은 건너뜀(크기 검사) → **이어받기** |
+
+라벨(TL/VL)을 먼저 받고 원천(TS/VS)을 받습니다. 주요 옵션:
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `BATCH` | `10` | 한 번의 aihubshell 호출에 넣을 filekey 수 (TS 10개 ≈ 6GB) |
+| `RETRY` | `2` | batch 검증 실패분 재요청 횟수 |
+| `CHECK_EXISTING` | `size` | 이미 있는 zip 판정: `size`(filelist 용량보다 확연히 작으면 재요청, 빠름) / `full`(전부 `unzip -tq`, NFS 30~40분) / `none` |
+| `ONLY` | (없음) | filekey CSV — 지정한 것만 받음 |
+| `MIN_FREE_MULT` | `25` | batch 시작 전 필요 여유 = batch 용량 × 2.5 |
+| `DRY_RUN` | `0` | `1`이면 계획만 출력 |
+
+### 6-2. 장시간 실행: tmux/byobu 안에서
+
+```bash
+tmux new -s aihub                 # byobu 도 동일
+#   (안에서) export 변수들 다시 설정 → bash "$REPO/verify/download_71349.sh"
+#   Ctrl+b d (byobu는 F6) 로 분리, tmux attach -t aihub 로 복귀
+```
+
+> ⚠️ **실행 중에 `Ctrl+Z`를 누르지 마세요.** 프로세스가 멈춘 채 잠금과 `download.tar`를 쥐고 남습니다.
+> 창에서 빠져나올 때는 `Ctrl+b d` / `F6`(detach)를 쓰세요.
+> 실수로 멈췄다면 `jobs` → `kill %번호`로 정리한 뒤 다시 실행하면 이어받습니다. ([10장](#10-중단재개))
+
+### 6-3. (참고) aihubshell 직접 실행
+
+```bash
 aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY"
 ```
 
-**장시간 실행이므로 세션이 끊겨도 살아남게 띄우세요:**
-
-```bash
-# tmux 권장
-tmux new -s aihub
-#   (안에서) aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY"
-#   Ctrl+b d 로 분리, tmux attach -t aihub 로 복귀
-
-# 또는 nohup
-nohup aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY" > download.log 2>&1 &
-tail -f download.log
-```
+이렇게 받아도 되지만, 위 표의 문제 때문에 끝난 뒤 반드시 [8장 검증 → 복구 루프](#8-검증--복구-루프)를 돌려야 합니다.
 
 **진행 상황 모니터링 (다른 터미널)**
 
@@ -319,7 +349,10 @@ bash "$REPO/verify/repair_aihub.sh"                # 실제 복구
 ```
 
 `ok / broken / missing / residue_only / never_downloaded` 5가지로 분류하고,
-`download.tar`·`.part` 잔재를 정리한 뒤 filekey를 50개씩 묶어 재다운로드합니다.
+`download.tar`·`.part` 잔재를 정리한 뒤 filekey를 **10개씩**(`BATCH`) 묶어 재다운로드합니다.
+v6부터는 batch마다 받은 zip을 `unzip -tq`로 확인해 실패분을 `RETRY`회(기본 2) 다시 받고,
+끝까지 실패한 것이 있으면 목록을 출력하고 exit 1로 끝납니다. `download_71349.sh`와 같은
+잠금 파일(`.aihub_download.lock`)을 써서 둘 중 하나만 실행됩니다.
 
 > ⚠️ **`DRY_RUN=0`이면 깨진 zip과 잔재를 실제로 삭제합니다.** 항상 `DRY_RUN=1`을 먼저 돌리세요.
 > ⚠️ 일부러 일부만 받은 상태라면 반드시 `INCLUDE_NEVER_DOWNLOADED=0`을 함께 주세요. ([9장](#9-부분-다운로드-원하는-것만-받기))
@@ -332,7 +365,7 @@ bash "$REPO/verify/check_aihub.sh"
 ```
 
 같은 파일이 2~3회 반복해도 계속 깨진다면 회선/서버 문제일 수 있습니다.
-`BATCH=10`으로 낮춰 소량씩 재시도해 보세요.
+`BATCH=5`처럼 더 낮춰 소량씩 재시도해 보세요.
 
 ---
 
@@ -376,13 +409,17 @@ sed -e 's/[─├└│]/ /g' filelist_71349.txt \
 
 | 증상 | 남는 흔적 | 조치 |
 |---|---|---|
-| 중간에 끊김 | `download.tar` | `repair_aihub.sh`가 자동 삭제 |
+| 중간에 끊김 | 현재 디렉토리의 `download.tar` / `download_YYYYMMDD_HHMMSS.tar` | `download_71349.sh`·`repair_aihub.sh`가 자동 삭제 |
+| curl이 끊겼는데 "Download successful" | **잘린 zip** (크기가 filelist보다 작음) | `download_71349.sh`·`repair_aihub.sh`(v6)가 batch 직후 검출 → 삭제 후 재요청 |
+| `Ctrl+Z`로 멈춤 | 멈춘 프로세스가 잠금·`download.tar`를 쥐고 남음 | `jobs` → `kill %번호` 후 재실행 (재실행 시 "다른 ... 실행 중" 으로 안내됨) |
 | 파일 일부만 받음 | `*.zip.part*` | `repair_aihub.sh`가 정리 후 재다운로드 |
 | zip은 있는데 손상 | 크기만 맞는 zip | `verify_zips.sh`가 검출 → `repair_aihub.sh`가 삭제 후 재다운로드 |
 | 아예 안 받은 파일 | 없음 | `repair_aihub.sh`가 filekey로 다운로드 |
 
 ```bash
 cd "$DSET"
+bash "$REPO/verify/download_71349.sh"            # 이어받기 (있는 zip은 건너뜀)
+# 또는 전수 무결성 검사 후 복구:
 export ROOT="$(find . -maxdepth 1 -type d -name '133.*' | head -1)"
 bash "$REPO/verify/check_aihub.sh"
 DRY_RUN=1 bash "$REPO/verify/repair_aihub.sh"
@@ -464,7 +501,7 @@ DEBUG=1 bash "$REPO/verify/check_aihub.sh"
 
 ### Q5. `AIHUB_APIKEY를 먼저 설정하세요`
 
-`repair_aihub.sh`는 API Key 없이는 동작하지 않습니다.
+`download_71349.sh`·`repair_aihub.sh`는 API Key 없이는 동작하지 않습니다.
 
 ```bash
 export AIHUB_APIKEY='<your_api_key>'
@@ -494,7 +531,7 @@ inode 부족이면 작은 파일 정리(`__pycache__`, 캐시)를 먼저 하세�
 ### Q9. 같은 파일이 계속 깨져서 받아집니다
 
 ```bash
-BATCH=10 bash "$REPO/verify/repair_aihub.sh"    # 한 번에 적게 요청
+BATCH=5 RETRY=3 bash "$REPO/verify/repair_aihub.sh"    # 한 번에 적게, 더 여러 번
 ```
 
 그래도 반복되면 시간을 두고 재시도하거나 AI Hub에 문의하세요.
@@ -503,6 +540,30 @@ BATCH=10 bash "$REPO/verify/repair_aihub.sh"    # 한 번에 적게 요청
 
 **정상입니다.** 이 데이터셋 zip은 내부 경로가 절대경로(`/K-...wav`)라 `unzip`이 경고와 함께 exit 1을 반환하는데,
 `extract_zips.sh`가 0과 1을 모두 성공으로 처리합니다. → [USAGE.md FAQ 4](USAGE.md#faq-4-unzip-warning-stripped-absolute-path-spec-가-무수히-출력돼요)
+
+### Q11. `[ERROR] 다른 download_71349.sh / repair_aihub.sh 가 이 디렉토리에서 실행 중입니다`
+
+같은 디렉토리에서 이미 하나가 돌고 있습니다. 두 개가 동시에 돌면 `download.tar`를 서로 백업·삭제해 결과가 꼬이므로 막아 둔 것입니다.
+
+```bash
+pgrep -af 'repair_aihub|download_71349|aihubshell'   # 누가 돌고 있는지
+jobs                                                 # 이 셸에서 Ctrl+Z 로 멈춘 것(Stopped)이 있는지
+kill %1                                              # 멈춘 작업 정리 (번호는 jobs 출력 기준)
+```
+
+`[ERROR] 이 디렉토리에서 aihubshell 이 이미 실행 중입니다`는 손으로 띄운 `aihubshell`이 같은 디렉토리에서 돌고 있다는 뜻입니다. 끝난 뒤 다시 실행하세요.
+`DRY_RUN=1`은 경고만 출력하고 계속 진행합니다(삭제·다운로드를 하지 않으므로).
+
+### Q12. `repair_aihub.sh: line 111: processed_base: unbound variable`
+
+v5의 버그입니다. **v6에서 수정**되었습니다(`git pull`).
+`.part` 잔재가 0개일 때(= 가장 흔한 경우) 1-B 단계의 통계 한 줄 출력이 실패한 것으로,
+v5에서도 판정·복구 동작 자체에는 영향이 없었습니다.
+
+원인: `set -u` 상태에서 `declare -A processed_base` 처럼 **선언만 하고 원소를 한 번도 넣지 않은 배열**은
+bash가 "unset"으로 취급해 `${#processed_base[@]}`가 unbound variable 에러가 됩니다
+(`.part` 파일이 하나라도 있으면 원소가 생겨 에러가 나지 않음).
+v6는 모든 배열을 `declare -A x=()`로 초기화하고, 빈 배열 순회는 `${a[@]+"${a[@]}"}`로 감싸 bash 4.0~4.3에서도 안전하게 했습니다.
 
 ---
 

@@ -41,6 +41,8 @@
 AI Hub의 대용량 음성 데이터셋은 다음과 같은 함정이 있습니다:
 
 - **다운로드 중단**: `aihubshell`이 종종 일부 파일만 받고 멈춤 (`download.tar`, `.part` 잔여물 발생)
+- **조용히 잘린 zip**: curl이 중간에 끊겨도 `aihubshell`이 `Download successful.`을 출력하고 잘린 tar를 풀어 버려, 크기가 모자란 zip이 정상처럼 남음
+- **동시 실행 사고**: 같은 폴더에서 두 번 실행(또는 `Ctrl+Z`로 멈춘 채 재실행)하면 `download.tar`를 서로 빼앗아 묶음 전체가 실패
 - **무결성 의문**: zip 1,412개가 다 멀쩡한지 일일이 확인 어려움
 - **압축 해제 함정**: zip 내부 파일이 절대경로(`/`)로 저장되어 있어 `unzip`이 warning과 함께 exit code 1을 반환 → 정상인데 스크립트가 실패로 오판
 - **메타데이터 구조 복잡**: 라벨(JSON)과 원천(wav)이 분리된 폴더(`02.라벨링데이터` vs `01.원천데이터`)에 있어 매핑이 까다로움
@@ -60,7 +62,7 @@ AI Hub의 대용량 음성 데이터셋은 다음과 같은 함정이 있습니�
 2. AI Hub 마이페이지에서 **API Key 발급** (스크립트는 ID/PW가 아니라 API Key를 사용합니다)
 3. [aihubshell 설치](https://www.aihub.or.kr) (공식 사이트 안내 참조)
 4. 충분한 디스크 (**최소 600GB 권장** — 압축 해제 중 zip 220GB + 해제본 293GB를 동시에 보관)
-5. Linux/macOS (bash 4.0+, Python 3.8+, `unzip`)
+5. Linux (bash 4.0+, Python 3.8+, `unzip`, `flock`, `pgrep`)
 
 ### 5분 요약 워크플로우
 
@@ -73,7 +75,8 @@ export AIHUB_APIKEY='<your_api_key>'
 # 1) AI Hub에서 다운로드
 mkdir -p ~/aihub_71349 && cd ~/aihub_71349
 cp "$REPO/verify/filelist_71349.txt" .        # 스크립트 기본값이 ./filelist_71349.txt
-aihubshell -mode d -datasetkey 71349 -aihubapikey "$AIHUB_APIKEY"
+DRY_RUN=1 bash "$REPO/verify/download_71349.sh" # 받을 개수·용량 미리보기
+bash "$REPO/verify/download_71349.sh"           # 10개씩 받고 batch마다 unzip -t 검증·재시도 (tmux 안에서)
 
 # 1-1) ROOT(데이터셋 최상위 폴더)를 실제 이름으로 잡기
 export ROOT="$(find . -maxdepth 1 -type d -name '133.*' | head -1)"
@@ -81,9 +84,9 @@ export ROOT="$(find . -maxdepth 1 -type d -name '133.*' | head -1)"
 # 2) 다운로드 검증
 bash "$REPO/verify/check_aihub.sh"
 
-# 3) (필요 시) 누락·손상 파일 자동 복구
+# 3) (필요 시) 누락·손상 파일 자동 복구 — 전체 zip 을 unzip -t 로 전수 검사한 뒤 재다운로드
 DRY_RUN=1 bash "$REPO/verify/repair_aihub.sh"   # 먼저 미리보기
-bash "$REPO/verify/repair_aihub.sh"
+bash "$REPO/verify/repair_aihub.sh"             # 실패분이 남으면 exit 1 → 다시 실행
 
 # 4) zip 무결성 검증 (선택, 시간 소요)
 PARALLEL=8 bash "$REPO/verify/verify_zips.sh"
@@ -144,9 +147,10 @@ aihub-no-pain-71349/
 │
 ├── verify/                      # 📥 1단계: 다운로드 검증 + 복구
 │   ├── filelist_71349.txt       # AI Hub 공식 파일 리스트 (기준값 + filekey)
+│   ├── download_71349.sh        # ★ 분할 다운로드 (10개씩 + batch 검증·재시도 + 동시 실행 방지)
 │   ├── check_aihub.sh           # 빠른 진단 — 누락 파일 식별
 │   ├── verify_zips.sh           # zip 무결성 검증 (병렬 CRC)
-│   └── repair_aihub.sh          # 자동 복구 (5가지 케이스 처리)
+│   └── repair_aihub.sh          # 자동 복구 (5가지 케이스 처리, v6)
 │
 ├── preprocess/                  # ⚙️ 2단계: 압축 해제 + 메타 생성
 │   ├── move_zips_to_zips_dir.sh # zip → zips/ 폴더로 이동
@@ -164,7 +168,7 @@ aihub-no-pain-71349/
 
 ```
        ┌──────────────────┐
-       │  AI Hub 다운로드  │ aihubshell
+       │  AI Hub 다운로드  │ verify/  download_71349.sh (→ aihubshell 을 10개씩 호출)
        └────────┬─────────┘
                 │
                 ▼
@@ -201,7 +205,12 @@ aihub-no-pain-71349/
 
 ## ✨ 핵심 기능
 
-### `verify/` — 다운로드 검증·복구
+### `verify/` — 다운로드·검증·복구
+- **`download_71349.sh`**: 처음 받기·이어받기용
+  - filekey **10개씩**(`BATCH`) `aihubshell` 호출 → 끊겨도 그 묶음만 다시
+  - batch 직후 받은 zip을 `unzip -tq` → 잘린 zip은 삭제 후 `RETRY`회 재요청, 끝까지 실패하면 목록 출력 + exit 1
+  - 라벨(TL/VL) 먼저, 이미 있는 zip은 건너뜀(`CHECK_EXISTING=size|full|none`)
+  - `flock` 잠금 + 같은 폴더의 aihubshell 검사로 **동시 실행 거부** (Ctrl+Z로 멈춘 실행도 감지)
 - **`check_aihub.sh`**: filelist 기준 누락 파일·잔여물 식별 (수분 내)
 - **`verify_zips.sh`**: 병렬로 모든 zip의 CRC 검증 (NFS 기준 약 30분 / 1,412개)
 - **`repair_aihub.sh`**: 5가지 케이스 자동 처리
@@ -210,7 +219,9 @@ aihub-no-pain-71349/
   - `missing` — 누락 파일 다운로드
   - `residue_only` — `.part` 등 잔여물만 있음 (정리 후 재시도)
   - `never_downloaded` — 한 번도 받지 않음
-  - + `download.tar` 잔여물 자동 정리
+  - + `download.tar`·`download_*.tar` 잔여물 자동 정리 (aihubshell이 만드는 현재 디렉토리 기준)
+  - v6: batch마다 결과 검증·재시도, `download_71349.sh`와 잠금 공유, `.part` 0개일 때
+    `processed_base: unbound variable`이 나던 버그 수정 ([download_guide.md Q12](download_guide.md#q12-repair_aihubsh-line-111-processed_base-unbound-variable))
 
 ### `preprocess/` — 압축 해제·메타 생성
 - **`extract_zips.sh`**: 병렬 압축 해제
